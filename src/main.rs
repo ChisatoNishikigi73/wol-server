@@ -8,27 +8,27 @@ use actix::{Actor, StreamHandler, Handler, Message, AsyncContext};
 use serde_json;
 use serde_json::json;
 
-/// 设备注册信息
+/// Device registration information
 #[derive(Debug, Deserialize, Serialize, Clone)]
 struct Device {
-    /// ESP8266 设备ID
+    /// ESP8266 Device ID
     esp_id: String,
-    /// 目标计算机MAC地址
+    /// Target computer MAC address
     mac_address: String,
-    /// 设备描述名称
+    /// Device description name
     description: String,
-    /// 密码
+    /// Password
     password: String,
 }
 
-/// 唤醒请求
+/// Wake request
 #[derive(Deserialize)]
 struct WakeRequest {
     esp_id: String,
     password: String,
 }
 
-/// 设备数据存储
+/// Device data storage
 struct DeviceStore {
     devices: Mutex<HashMap<String, Device>>,
     file_path: String,
@@ -36,10 +36,10 @@ struct DeviceStore {
 }
 
 impl DeviceStore {
-    /// 创建新的设备存储实例
+    /// Create a new device storage instance
     fn new(file_path: &str) -> Self {
         if !std::path::Path::new(file_path).exists() {
-            fs::write(file_path, "{}").expect("无法创建设备文件");
+            fs::write(file_path, "{}").expect("Failed to create device file");
         }
         
         let devices = match fs::read_to_string(file_path) {
@@ -54,84 +54,122 @@ impl DeviceStore {
         }
     }
 
-    /// 保存设备数据到文件
+    /// Save device data to file
     fn save(&self) -> std::io::Result<()> {
-        let devices = self.devices.lock().unwrap();
-        let json = serde_json::to_string_pretty(&*devices)?;
+        let json = {
+            let devices = self.devices.lock().unwrap();
+            serde_json::to_string_pretty(&*devices)?
+        };
         fs::write(&self.file_path, json)
     }
 }
 
-/// 注册新设备
+/// Register new device
 async fn register_device(
     store: web::Data<DeviceStore>,
     device: web::Json<Device>,
 ) -> impl Responder {
-    let mut devices = store.devices.lock().unwrap();
-    devices.insert(device.esp_id.clone(), device.into_inner());
+    println!("[Register] New device registration request: ID={}", device.esp_id);
+    
+    {
+        let mut devices = store.devices.lock().unwrap();
+        devices.insert(device.esp_id.clone(), device.into_inner());
+    }
     
     match store.save() {
-        Ok(_) => HttpResponse::Ok().json("设备注册成功"),
-        Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
+        Ok(_) => {
+            println!("[Register] Device registered and saved successfully");
+            HttpResponse::Ok().json("Device registered successfully")
+        },
+        Err(e) => {
+            println!("[Register] Failed to save device info: {}", e);
+            HttpResponse::InternalServerError().body(e.to_string())
+        },
     }
 }
 
-/// 获取所有注册设备
+/// Get all registered devices
 async fn get_devices(store: web::Data<DeviceStore>) -> impl Responder {
-    let devices = match store.devices.lock() {
-        Ok(guard) => guard,
-        Err(_) => return HttpResponse::InternalServerError().json("获取设备列表失败"),
+    println!("[Query] Received request for device list");
+    
+    let devices_vec = {
+        let devices = match store.devices.lock() {
+            Ok(guard) => guard,
+            Err(e) => {
+                println!("[Query] Failed to get device list: {}", e);
+                return HttpResponse::InternalServerError().json("Failed to get device list");
+            }
+        };
+        devices.values().cloned().collect::<Vec<Device>>()
     };
     
-    let devices_vec: Vec<Device> = devices.values().cloned().collect();
+    println!("[Query] Returning device list, total {} devices", devices_vec.len());
     
     HttpResponse::Ok()
         .insert_header(("Access-Control-Allow-Origin", "*"))
         .json(&devices_vec)
 }
 
-/// 发送唤醒命令到指定的 ESP8266
+/// Send wake command to specified ESP8266
 async fn wake_device(
     store: web::Data<DeviceStore>,
     wake_req: web::Json<WakeRequest>,
 ) -> impl Responder {
-    let devices = store.devices.lock().unwrap();
+    println!("[Wake] Received wake request: ID={}", wake_req.esp_id);
     
-    match devices.get(&wake_req.esp_id) {
+    let device = {
+        let devices = store.devices.lock().unwrap();
+        devices.get(&wake_req.esp_id).cloned()
+    };
+    
+    match device {
         Some(device) => {
             if device.password != wake_req.password {
-                return HttpResponse::Unauthorized().json("密码错误");
+                println!("[Wake] Password verification failed: ID={}", wake_req.esp_id);
+                return HttpResponse::Unauthorized().json("Incorrect password");
             }
             
-            // 检查设备是否在线并发送唤醒命令
-            let connections = store.active_connections.lock().unwrap();
-            if let Some(addr) = connections.get(&wake_req.esp_id) {
-                // 发送唤醒命令
+            let addr = {
+                let connections = store.active_connections.lock().unwrap();
+                connections.get(&wake_req.esp_id).cloned()
+            };
+            
+            if let Some(addr) = addr {
                 let wake_msg = json!({
                     "type": "wake",
                     "mac_address": device.mac_address
                 });
                 
                 match addr.try_send(WsMessage(wake_msg.to_string())) {
-                    Ok(_) => HttpResponse::Ok().json("唤醒命令已发送"),
-                    Err(_) => HttpResponse::InternalServerError().json("发送唤醒命令失败"),
+                    Ok(_) => {
+                        println!("[Wake] Wake command sent successfully: ID={}, MAC={}", wake_req.esp_id, device.mac_address);
+                        HttpResponse::Ok().json("Wake command sent")
+                    },
+                    Err(e) => {
+                        println!("[Wake] Failed to send wake command: {}", e);
+                        HttpResponse::InternalServerError().json("Failed to send wake command")
+                    },
                 }
             } else {
-                HttpResponse::NotFound().json("设备不在线")
+                println!("[Wake] Device offline: ID={}", wake_req.esp_id);
+                HttpResponse::NotFound().json("Device offline")
             }
         },
-        None => HttpResponse::NotFound().json("设备未找到"),
+        None => {
+            println!("[Wake] Device not found: ID={}", wake_req.esp_id);
+            HttpResponse::NotFound().json("Device not found")
+        },
     }
 }
 
-/// 首页处理程序
+/// Home page handler
 async fn index() -> impl Responder {
     HttpResponse::Ok().content_type("text/html").body(
         r#"
         <!DOCTYPE html>
         <html>
         <head>
-            <title>WiFi 设备管理</title>
+            <title>WiFi Device Management</title>
             <meta charset="utf-8">
             <style>
                 body {
@@ -178,22 +216,20 @@ async fn index() -> impl Responder {
             </style>
         </head>
         <body>
-            <h1>WiFi 设备管理系统</h1>
+            <h1>WiFi Device Management System</h1>
             <div id="status" class="status"></div>
             <div id="devices-container"></div>
             <div id="debug-info" style="margin-top: 20px; padding: 10px; background-color: #f0f0f0;"></div>
 
             <script>
-                // 添加调试信息显示函数
                 function showDebugInfo(info) {
                     const debugDiv = document.getElementById('debug-info');
                     debugDiv.innerHTML += `<p>${new Date().toLocaleTimeString()}: ${info}</p>`;
                 }
 
-                // 获取设备列表
                 async function fetchDevices() {
                     try {
-                        showDebugInfo('正在获取设备列表...');
+                        showDebugInfo('Fetching device list...');
                         const response = await fetch('/devices', {
                             method: 'GET',
                             headers: {
@@ -201,48 +237,47 @@ async fn index() -> impl Responder {
                             }
                         });
                         
-                        showDebugInfo(`HTTP状态: ${response.status}`);
+                        showDebugInfo(`HTTP status: ${response.status}`);
                         
                         if (!response.ok) {
                             throw new Error(`HTTP error! status: ${response.status}`);
                         }
                         
                         const responseText = await response.text();
-                        showDebugInfo(`收到响应: ${responseText}`);
+                        showDebugInfo(`Response received: ${responseText}`);
                         
                         const devices = JSON.parse(responseText);
-                        showDebugInfo(`解析后的设备数量: ${devices.length}`);
+                        showDebugInfo(`Parsed devices count: ${devices.length}`);
                         
                         const container = document.getElementById('devices-container');
                         container.innerHTML = '';
 
                         if (!devices || devices.length === 0) {
-                            container.innerHTML = '<p>暂无注册设备</p>';
+                            container.innerHTML = '<p>No registered devices</p>';
                             return;
                         }
 
                         devices.forEach(device => {
-                            showDebugInfo(`处理设备: ${JSON.stringify(device)}`);
+                            showDebugInfo(`Processing device: ${JSON.stringify(device)}`);
                             const deviceElement = document.createElement('div');
                             deviceElement.className = 'device-card';
                             deviceElement.innerHTML = `
                                 <h3>${device.description}</h3>
-                                <p>设备ID: ${device.esp_id}</p>
-                                <p>MAC地址: ${device.mac_address}</p>
-                                <input type="password" id="pwd-${device.esp_id}" placeholder="输入设备密码">
+                                <p>Device ID: ${device.esp_id}</p>
+                                <p>MAC Address: ${device.mac_address}</p>
+                                <input type="password" id="pwd-${device.esp_id}" placeholder="Enter device password">
                                 <button class="wake-btn" onclick="wakeDevice('${device.esp_id}')">
-                                    唤醒设备
+                                    Wake Device
                                 </button>
                             `;
                             container.appendChild(deviceElement);
                         });
                     } catch (error) {
-                        showDebugInfo(`错误: ${error.message}`);
-                        showStatus('获取设备列表失败: ' + error.message, false);
+                        showDebugInfo(`Error: ${error.message}`);
+                        showStatus('Failed to fetch device list: ' + error.message, false);
                     }
                 }
 
-                // 唤醒设备
                 async function wakeDevice(espId) {
                     try {
                         const passwordInput = document.getElementById(`pwd-${espId}`);
@@ -260,17 +295,16 @@ async fn index() -> impl Responder {
                         });
 
                         if (response.ok) {
-                            showStatus('唤醒命令已发送', true);
+                            showStatus('Wake command sent', true);
                         } else {
                             const error = await response.text();
-                            showStatus('唤醒失败: ' + error, false);
+                            showStatus('Wake failed: ' + error, false);
                         }
                     } catch (error) {
-                        showStatus('发送唤醒命令失败: ' + error.message, false);
+                        showStatus('Failed to send wake command: ' + error.message, false);
                     }
                 }
 
-                // 显示状态信息
                 function showStatus(message, isSuccess) {
                     const status = document.getElementById('status');
                     status.textContent = message;
@@ -280,10 +314,7 @@ async fn index() -> impl Responder {
                     }, 3000);
                 }
 
-                // 页面加载时获取设备列表
                 document.addEventListener('DOMContentLoaded', fetchDevices);
-
-                // 每30秒刷新一次设备列表
                 setInterval(fetchDevices, 30000);
             </script>
         </body>
@@ -292,12 +323,12 @@ async fn index() -> impl Responder {
     )
 }
 
-/// WebSocket消息包装
+/// WebSocket message wrapper
 #[derive(Message)]
 #[rtype(result = "()")]
 struct WsMessage(String);
 
-/// WebSocket连接处理
+/// WebSocket connection handler
 struct WsConnection {
     esp_id: String,
     store: web::Data<DeviceStore>,
@@ -315,11 +346,13 @@ impl Actor for WsConnection {
     type Context = ws::WebsocketContext<Self>;
 
     fn started(&mut self, ctx: &mut Self::Context) {
+        println!("[WebSocket] New connection established: ID={}", self.esp_id);
         let mut connections = self.store.active_connections.lock().unwrap();
         connections.insert(self.esp_id.clone(), ctx.address());
     }
 
     fn stopped(&mut self, _ctx: &mut Self::Context) {
+        println!("[WebSocket] Connection closed: ID={}", self.esp_id);
         let mut connections = self.store.active_connections.lock().unwrap();
         connections.remove(&self.esp_id);
     }
@@ -337,7 +370,7 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for WsConnection {
     }
 }
 
-/// WebSocket连接处理函数
+/// WebSocket connection handler function
 async fn ws_index(
     req: HttpRequest,
     stream: web::Payload,
@@ -358,7 +391,8 @@ async fn ws_index(
 async fn main() -> std::io::Result<()> {
     let store = web::Data::new(DeviceStore::new("devices.json"));
     
-    println!("服务器启动在 http://127.0.0.1:54001");
+    println!("[System] Server started at http://127.0.0.1:54001");
+    println!("[System] WebSocket service is running");
 
     HttpServer::new(move || {
         App::new()
