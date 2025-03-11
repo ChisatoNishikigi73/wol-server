@@ -169,7 +169,7 @@ async fn index() -> impl Responder {
         <!DOCTYPE html>
         <html>
         <head>
-            <title>WiFi Device Management</title>
+            <title>Remote Wake System</title>
             <meta charset="utf-8">
             <style>
                 body {
@@ -183,9 +183,6 @@ async fn index() -> impl Responder {
                     padding: 15px;
                     margin: 10px 0;
                     border-radius: 5px;
-                }
-                .device-card:hover {
-                    background-color: #f5f5f5;
                 }
                 .wake-btn {
                     background-color: #4CAF50;
@@ -216,56 +213,33 @@ async fn index() -> impl Responder {
             </style>
         </head>
         <body>
-            <h1>WiFi Device Management System</h1>
+            <h1>Remote Wake System</h1>
             <div id="status" class="status"></div>
             <div id="devices-container"></div>
-            <div id="debug-info" style="margin-top: 20px; padding: 10px; background-color: #f0f0f0;"></div>
 
             <script>
-                function showDebugInfo(info) {
-                    const debugDiv = document.getElementById('debug-info');
-                    debugDiv.innerHTML += `<p>${new Date().toLocaleTimeString()}: ${info}</p>`;
-                }
-
                 async function fetchDevices() {
                     try {
-                        showDebugInfo('Fetching device list...');
-                        const response = await fetch('/devices', {
-                            method: 'GET',
-                            headers: {
-                                'Accept': 'application/json'
-                            }
-                        });
-                        
-                        showDebugInfo(`HTTP status: ${response.status}`);
-                        
+                        const response = await fetch('/devices');
                         if (!response.ok) {
-                            throw new Error(`HTTP error! status: ${response.status}`);
+                            throw new Error('Failed to fetch devices');
                         }
                         
-                        const responseText = await response.text();
-                        showDebugInfo(`Response received: ${responseText}`);
-                        
-                        const devices = JSON.parse(responseText);
-                        showDebugInfo(`Parsed devices count: ${devices.length}`);
-                        
+                        const devices = await response.json();
                         const container = document.getElementById('devices-container');
                         container.innerHTML = '';
 
                         if (!devices || devices.length === 0) {
-                            container.innerHTML = '<p>No registered devices</p>';
+                            container.innerHTML = '<p>No devices available</p>';
                             return;
                         }
 
                         devices.forEach(device => {
-                            showDebugInfo(`Processing device: ${JSON.stringify(device)}`);
                             const deviceElement = document.createElement('div');
                             deviceElement.className = 'device-card';
                             deviceElement.innerHTML = `
                                 <h3>${device.description}</h3>
-                                <p>Device ID: ${device.esp_id}</p>
-                                <p>MAC Address: ${device.mac_address}</p>
-                                <input type="password" id="pwd-${device.esp_id}" placeholder="Enter device password">
+                                <input type="password" id="pwd-${device.esp_id}" placeholder="Enter password">
                                 <button class="wake-btn" onclick="wakeDevice('${device.esp_id}')">
                                     Wake Device
                                 </button>
@@ -273,8 +247,7 @@ async fn index() -> impl Responder {
                             container.appendChild(deviceElement);
                         });
                     } catch (error) {
-                        showDebugInfo(`Error: ${error.message}`);
-                        showStatus('Failed to fetch device list: ' + error.message, false);
+                        showStatus('Connection error', false);
                     }
                 }
 
@@ -295,13 +268,12 @@ async fn index() -> impl Responder {
                         });
 
                         if (response.ok) {
-                            showStatus('Wake command sent', true);
+                            showStatus('Command sent successfully', true);
                         } else {
-                            const error = await response.text();
-                            showStatus('Wake failed: ' + error, false);
+                            showStatus('Command failed', false);
                         }
                     } catch (error) {
-                        showStatus('Failed to send wake command: ' + error.message, false);
+                        showStatus('Connection error', false);
                     }
                 }
 
