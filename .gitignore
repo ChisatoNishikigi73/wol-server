@@ -1,0 +1,8 @@
+/target
+/.vscode
+/release
+devices.json
+Cross.toml
+Cargo.lock
+config.toml
+build-linux.bat
